@@ -11,6 +11,8 @@ mod youtube;
 use std::path::PathBuf;
 
 use anyhow::Context as _;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt as _;
 use sqlx::postgres::PgPoolOptions;
 use tracing::info;
 use tracing_subscriber::{EnvFilter, fmt, prelude::*};
@@ -92,9 +94,28 @@ async fn main() -> anyhow::Result<()> {
 
     info!("initialising yt-dlp (may download binaries on first run)…");
 
-    let mut downloader_builder = Downloader::with_new_binaries(libs_dir, output_dir)
+    let mut downloader_builder = Downloader::with_new_binaries(libs_dir.clone(), output_dir)
         .await
         .context("failed to install yt-dlp / ffmpeg binaries")?;
+
+    // The yt-dlp crate downloads the binary but does not set the executable
+    // bit on Linux. Ensure both binaries are executable before we proceed.
+    #[cfg(unix)]
+    {
+        for name in &["yt-dlp", "ffmpeg"] {
+            let path = libs_dir.join(name);
+            if path.exists() {
+                let mut perms = std::fs::metadata(&path)
+                    .with_context(|| format!("failed to stat {}", path.display()))?
+                    .permissions();
+                // Add owner+group+other execute bits (0o111).
+                perms.set_mode(perms.mode() | 0o111);
+                std::fs::set_permissions(&path, perms)
+                    .with_context(|| format!("failed to chmod +x {}", path.display()))?;
+                info!(path = %path.display(), "ensured executable bit on binary");
+            }
+        }
+    }
 
     // If a Node.js executable is configured, tell yt-dlp to use it so that the
     // YouTube n-signature throttle challenge can be solved and CDN downloads run
