@@ -1,2 +1,33 @@
-/target
+# Rust build artifacts
+/target/
+
+# Environment variables
 .env
+.env.*
+!.env.example
+
+# Runtime binary downloads (yt-dlp, ffmpeg - downloaded at runtime in Docker)
+/libs/
+
+# Runtime download output (audio files generated at runtime)
+/output/*
+!/output/.gitkeep
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.idea/
+.vscode/*
+!.vscode/extensions.json
+*.sw?
+
+# IDE / tool config
+.opencode/
+
+# SQLx offline cache (optional: include if using offline mode)
+# .sqlx/
+
+# Kubernetes manifests (deployed manually, not via GitHub Actions)
+k8s/

@@ -1,0 +1,33 @@
+# Rust build artifacts
+target/
+
+# Environment variables (never bake into image)
+.env
+.env.*
+
+# Local dev binaries (Windows exe — downloaded at runtime in Docker)
+libs/
+
+# Runtime audio output
+output/
+
+# Git
+.git/
+.gitignore
+
+# Editor / IDE
+.vscode/
+.idea/
+.opencode/
+*.sw?
+
+# OS
+.DS_Store
+Thumbs.db
+
+# CI/CD and K8s manifests (not needed in image)
+.github/
+k8s/
+
+# Docs
+README.md

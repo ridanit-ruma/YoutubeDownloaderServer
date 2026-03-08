@@ -1,0 +1,49 @@
+name: Build and Push Server
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  # 이미지 빌드 후 ghcr.io push만 수행
+  # K8s 배포는 수동으로 진행
+  build-and-push:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write  # ghcr.io push에 필요
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set image tag
+        id: meta
+        run: |
+          SHA_TAG="sha-$(echo ${{ github.sha }} | cut -c1-7)"
+          echo "sha_tag=${SHA_TAG}" >> $GITHUB_OUTPUT
+          echo "Image tag: ${SHA_TAG}"
+
+      - name: Login to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: |
+            ghcr.io/ridanit-ruma/youtubedownloaderserver:latest
+            ghcr.io/ridanit-ruma/youtubedownloaderserver:${{ steps.meta.outputs.sha_tag }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
