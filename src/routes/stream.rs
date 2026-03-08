@@ -14,6 +14,8 @@ use utoipa::IntoParams;
 use yt_dlp::VideoSelection as _;
 use yt_dlp::model::format::{Extension, Format};
 
+use yt_dlp::model::selector::{VideoCodecPreference, VideoQuality};
+
 use crate::{
     error::{AppError, HttpError},
     middleware::AuthUser,
@@ -44,6 +46,17 @@ const MIN_CHUNK_SIZE: u64 = 256 * 1024; // 256 KB
 pub struct StreamQuery {
     /// The YouTube URL or video ID to stream.
     pub url: String,
+}
+
+/// Query parameters for `GET /stream-video`.
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct StreamVideoQuery {
+    /// The YouTube URL or video ID to stream.
+    pub url: String,
+    /// Target video height in pixels (e.g. 1080, 720, 480, 360).
+    /// Omit or set to 0 for the best available quality.
+    #[serde(default)]
+    pub height: u32,
 }
 
 /// `GET /stream?url=<youtube_url>`
@@ -184,7 +197,160 @@ pub async fn stream_audio(
     Ok((StatusCode::OK, resp_headers, body).into_response())
 }
 
-/// Downloads `total_bytes` from `url` using `PARALLEL_CHUNKS` concurrent
+/// `GET /stream-video?url=<youtube_url>&height=<pixels>`
+///
+/// Resolves the best video-only format (H.264/AVC preferred for browser compat)
+/// at the requested height, fetches it in parallel Range chunks, and streams
+/// the raw video bytes to the client as `video/mp4`.
+/// Requires a valid JWT (`Authorization: Bearer <token>`).
+#[utoipa::path(
+    get,
+    path = "/stream-video",
+    tag  = "youtube",
+    security(("bearer_auth" = [])),
+    params(StreamVideoQuery),
+    responses(
+        (status = 200,  description = "Video stream (binary)",           content_type = "video/mp4"),
+        (status = 400,  description = "Invalid YouTube URL"),
+        (status = 401,  description = "Unauthorized"),
+        (status = 422,  description = "No video format available"),
+        (status = 502,  description = "CDN upstream error"),
+        (status = 500,  description = "Internal server error"),
+    )
+)]
+#[tracing::instrument(skip(state), fields(url = %query.url, height = query.height))]
+pub async fn stream_video(
+    State(state):      State<AppState>,
+    AuthUser(_claims): AuthUser,
+    Query(query):      Query<StreamVideoQuery>,
+) -> Result<Response, AppError> {
+    // ── 1. Normalise input URL ────────────────────────────────────────────────
+    let canonical_url = normalise_youtube_url(&query.url).map_err(AppError::from_http)?;
+
+    info!(%canonical_url, height = query.height, "fetching video info for video stream");
+
+    // ── 2. Fetch video metadata via yt-dlp ───────────────────────────────────
+    let video = state
+        .downloader
+        .fetch_video_infos(&canonical_url)
+        .await
+        .map_err(|e| AppError::internal(format!("yt-dlp fetch failed: {e}")))?;
+
+    // ── 3. Select video-only format ───────────────────────────────────────────
+    // Prefer H.264/AVC for widest browser compatibility.
+    // Fall back to any codec if AVC is unavailable.
+    let quality = if query.height == 0 {
+        VideoQuality::Best
+    } else {
+        VideoQuality::CustomHeight(query.height)
+    };
+
+    let format = video
+        .select_video_format(quality, VideoCodecPreference::AVC1)
+        .or_else(|| video.select_video_format(quality, VideoCodecPreference::Any))
+        .ok_or_else(|| {
+            AppError::from_http(HttpError::unprocessable(
+                "no video format available for this video",
+            ))
+        })?;
+
+    // ── 4. Extract CDN URL ───────────────────────────────────────────────────
+    let cdn_url = format
+        .url()
+        .map_err(|e| AppError::internal(format!("format has no URL: {e}")))?
+        .clone();
+
+    let ext      = format.download_info.ext;
+    let filesize = format.file_info.filesize
+        .or(format.file_info.filesize_approx);
+    let height   = format.video_resolution.height.unwrap_or(0);
+    let fps      = format.video_resolution.fps.map(|f| *f).unwrap_or(0.0);
+
+    let yt_headers = format.download_info.http_headers.to_header_map();
+
+    info!(
+        video_id = %video.id,
+        title    = %video.title,
+        ext      = %ext,
+        height,
+        fps,
+        filesize = ?filesize,
+        "streaming video format"
+    );
+
+    // ── 5. Build response headers ─────────────────────────────────────────────
+    let mut resp_headers = HeaderMap::new();
+
+    let mime_str = video_mime(&ext);
+    resp_headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_str(mime_str)
+            .unwrap_or(HeaderValue::from_static("application/octet-stream")),
+    );
+
+    let safe_title  = sanitise_filename(&video.title);
+    let file_ext    = ext.as_str();
+    let pct_title   = percent_encode_filename(&format!("{safe_title}.{file_ext}"));
+    let disposition = format!("attachment; filename*=UTF-8''{pct_title}");
+    if let Ok(v) = HeaderValue::from_str(&disposition) {
+        resp_headers.insert(header::CONTENT_DISPOSITION, v);
+    }
+
+    if let Some(size) = filesize {
+        if let Ok(v) = HeaderValue::from_str(&size.to_string()) {
+            resp_headers.insert(header::CONTENT_LENGTH, v);
+        }
+    }
+
+    resp_headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+
+    // ── 6. Choose download strategy ──────────────────────────────────────────
+    let body = match filesize.filter(|&s| s >= MIN_CHUNK_SIZE as i64) {
+        Some(total_bytes) => {
+            parallel_range_body(
+                state.http_client.clone(),
+                cdn_url,
+                yt_headers,
+                total_bytes as u64,
+                parallel_chunks(),
+            )
+            .await?
+        }
+        None => {
+            let upstream = state
+                .http_client
+                .get(&cdn_url)
+                .headers(yt_headers)
+                .send()
+                .await
+                .map_err(|e| AppError::internal(format!("upstream CDN request failed: {e}")))?;
+
+            if !upstream.status().is_success() {
+                return Err(AppError::from_http(HttpError::new(
+                    StatusCode::BAD_GATEWAY,
+                    "BAD_GATEWAY",
+                    format!("CDN returned HTTP {}", upstream.status()),
+                )));
+            }
+
+            Body::from_stream(upstream.bytes_stream())
+        }
+    };
+
+    Ok((StatusCode::OK, resp_headers, body).into_response())
+}
+
+/// Maps an [`Extension`] to a video MIME type string.
+fn video_mime(ext: &Extension) -> &'static str {
+    match ext {
+        Extension::Mp4  => "video/mp4",
+        Extension::Webm => "video/webm",
+        Extension::Ts   => "video/mp2t",
+        Extension::Avi  => "video/x-msvideo",
+        Extension::Flv  => "video/x-flv",
+        _               => "video/mp4",
+    }
+}
 /// Range requests, then streams the assembled bytes in order to the caller.
 ///
 /// The actual assembly happens asynchronously via a channel: each chunk task

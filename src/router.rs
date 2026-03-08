@@ -32,6 +32,7 @@ use crate::{config::AppConfig, routes, state::AppState};
         routes::admin::admin_set_admin,
         routes::admin::admin_set_require_password_reset,
         routes::stream::stream_audio,
+        routes::stream::stream_video,
     ),
     components(
         schemas(
@@ -82,7 +83,11 @@ impl utoipa::Modify for SecurityAddon {
 /// Assembles and returns the full application router with all middleware.
 pub fn create_router(config: &AppConfig, state: AppState) -> axum::Router {
     let trace_layer = TraceLayer::new_for_http()
-        .make_span_with(DefaultMakeSpan::new().level(Level::INFO).include_headers(false))
+        .make_span_with(
+            DefaultMakeSpan::new()
+                .level(Level::INFO)
+                .include_headers(false),
+        )
         .on_response(DefaultOnResponse::new().level(Level::INFO));
 
     let cors_layer = CorsLayer::new()
@@ -95,7 +100,7 @@ pub fn create_router(config: &AppConfig, state: AppState) -> axum::Router {
         Duration::from_secs(config.request_timeout_secs),
     );
 
-    let set_request_id       = SetRequestIdLayer::x_request_id(MakeRequestUuid);
+    let set_request_id = SetRequestIdLayer::x_request_id(MakeRequestUuid);
     let propagate_request_id = PropagateRequestIdLayer::x_request_id();
 
     // ── API routes ────────────────────────────────────────────────────────────
@@ -103,6 +108,7 @@ pub fn create_router(config: &AppConfig, state: AppState) -> axum::Router {
     // take several minutes depending on file size and network speed.
     let stream_router = axum::Router::new()
         .route("/stream", get(routes::stream::stream_audio))
+        .route("/stream-video", get(routes::stream::stream_video))
         .with_state(state.clone());
 
     let api = axum::Router::new()
@@ -114,8 +120,14 @@ pub fn create_router(config: &AppConfig, state: AppState) -> axum::Router {
         // Admin only
         .route("/admin/users", get(routes::admin::admin_list_users))
         .route("/admin/users", post(routes::admin::admin_create_user))
-        .route("/admin/users/{id}", delete(routes::admin::admin_delete_user))
-        .route("/admin/users/{id}/admin", patch(routes::admin::admin_set_admin))
+        .route(
+            "/admin/users/{id}",
+            delete(routes::admin::admin_delete_user),
+        )
+        .route(
+            "/admin/users/{id}/admin",
+            patch(routes::admin::admin_set_admin),
+        )
         .route(
             "/admin/users/{id}/require-password-reset",
             patch(routes::admin::admin_set_require_password_reset),
@@ -124,8 +136,7 @@ pub fn create_router(config: &AppConfig, state: AppState) -> axum::Router {
         .with_state(state);
 
     // ── Swagger UI (served at /swagger-ui) ───────────────────────────────────
-    let swagger = SwaggerUi::new("/swagger-ui")
-        .url("/api-docs/openapi.json", ApiDoc::openapi());
+    let swagger = SwaggerUi::new("/swagger-ui").url("/api-docs/openapi.json", ApiDoc::openapi());
 
     axum::Router::new()
         .merge(stream_router)
