@@ -52,6 +52,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 \
         ffmpeg \
         curl \
+        nodejs \
     && rm -rf /var/lib/apt/lists/*
 
 RUN groupadd --system app && useradd --system --gid app app
@@ -70,7 +71,8 @@ ENV HOST=0.0.0.0 \
     PORT=3000 \
     LOG_LEVEL=info \
     REQUEST_TIMEOUT_SECS=30 \
-    JWT_EXPIRY_SECS=86400
+    JWT_EXPIRY_SECS=86400 \
+    NODE_PATH=/usr/bin/node
 
 EXPOSE 3000
 
