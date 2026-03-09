@@ -58,7 +58,7 @@ cargo build --release
 Build from the **project root** (one level above this directory):
 
 ```bash
-podman build -f dockerfile/Dockerfile.server -t ytdlweb-server:latest .
+podman build -f Dockerfile -t ytdlweb-server:latest .
 ```
 
 Run:
